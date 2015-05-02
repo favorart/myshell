@@ -73,3 +73,15 @@ $RECYCLE.BIN/
 
 # Windows shortcuts
 *.lnk
+debug.mak
+*.log
+*.dat
+release.mak
+*.filters
+myshell.vcxproj
+*.vgdbsettings
+Makefile.old
+*.old
+gcc_Release.h
+Makefile
+gcc_Debug.h
