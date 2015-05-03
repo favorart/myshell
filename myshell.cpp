@@ -16,8 +16,8 @@
 #include <list>
 #include <cerrno>
 
-sig_atomic_t flag_sigint;
-pid_t  child_foreground_pid; // можно как-то передать pid в обработчик?
+volatile sig_atomic_t  flag_sigint;
+volatile pid_t  child_foreground_pid; // можно как-то передать pid в обработчик?
 void sigint_handle (int sig)
 { 
   // printf («proc interrapted\n»);
@@ -26,10 +26,26 @@ void sigint_handle (int sig)
     kill (child_foreground_pid, SIGINT);
 }
 
+int  set_cloexec_flag (int desc, bool set)
+{
+  int oldflags = fcntl (desc, F_GETFD, 0);
+  /* If reading the flags failed, return error indication now. */
+  if ( oldflags < 0 )
+    return oldflags;
+  /* Set just the flag we want to set. */
+  if ( set )
+    oldflags |=  FD_CLOEXEC;
+  else
+    oldflags &= ~FD_CLOEXEC;
+  /* Store modified flag word in the descriptor. */
+  return fcntl (desc, F_SETFD, oldflags);
+}
+
 int   shell_cmd_lunch (int argc,  char  **argv)
 {
   //--------------------
   pid_t pid = fork ();
+  
   if ( pid == 0 )
   {
     //------------------------------------
@@ -38,12 +54,12 @@ int   shell_cmd_lunch (int argc,  char  **argv)
       char *in_file = argv[argc - 1];
       argv[argc - 2] = NULL;
 
-      // int  stdin_copy = dup ( STDIN_FILENO);
+      // int  stdin_copy = dup (STDIN_FILENO);
       close (STDIN_FILENO);
       /* must be 0, because returns always the lowest value */
       int fd = open (in_file, O_RDONLY);
 
-      // close (fd);
+      // close (in_file);
       // dup2  (stdin_copy, STDIN_FILENO);
       // close (stdin_copy);
     }
@@ -57,8 +73,8 @@ int   shell_cmd_lunch (int argc,  char  **argv)
       // the lowest available value
       int fd = open (out_file, O_APPEND | O_TRUNC | O_CREAT);
 
-      // close (fd);
-      // dup2 (stdout_copy, 1);
+      // close (out_file);
+      // dup2  (stdout_copy, STDOUT_FILENO);
       // close (stdout_copy);
     }
     //------------------------------------
@@ -368,7 +384,6 @@ int  main (int argc, char** argv)
       sigset_t sigintset;
       sigemptyset (&sigintset);
       sigaddset (&sigintset, SIGHUP);
-      sigaddset (&sigintset, SIGINT);
       /* ... */
       sigprocmask (SIG_BLOCK, &sigintset, 0);
       sa.sa_handler = sigint_handle;
