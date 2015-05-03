@@ -85,3 +85,4 @@ Makefile.old
 gcc_Release.h
 Makefile
 gcc_Debug.h
+shell_example.cpp

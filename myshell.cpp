@@ -16,58 +16,23 @@
 #include <list>
 #include <cerrno>
 
-int ch_pid; // можно как-то передать pid в обработчик?
+sig_atomic_t flag_sigint;
+pid_t  child_foreground_pid; // можно как-то передать pid в обработчик?
 void sigint_handle (int sig)
-{ // printf («proc interrapted\n»);
-  kill (ch_pid, SIGINT);
+{ 
+  // printf («proc interrapted\n»);
+  flag_sigint = 1;
+  if( child_foreground_pid )
+    kill (child_foreground_pid, SIGINT);
 }
 
-void  shell           (std::list<std::string> &cmds)
-{
-  int i = 0;
-  char** args = new char*[cmds.size () + 1];
-
-  int in_and = 0, in_or = 0, in_pip = 0;
-
-  for ( std::string &s : cmds )
-  {
-    
-     if ( s == "|" )
-    {
-      in_pip = 1;
-      // int n;
-      // char ***args;
-      // shell_pipeline (args, n);
-    
-    }
-    else if ( s == "||" )
-    {
-      args[i] = NULL;
-      if ( shell_cmd_lunch (i, args) )
-        return;
-      i = 0;
-    }
-    else if ( s == "&&" )
-    {
-      args[i] = NULL;
-      if ( !shell_cmd_lunch (i, args) )
-        return;
-      i = 0;
-    }
-    else
-    { args[i++] = (char*) s.c_str (); }
-
-    // cmds.pop_front ();
-  }
-
-  delete[] args;
-}
-int   shell_cmd_lunch (int argc, char **argv)
+int   shell_cmd_lunch (int argc,  char  **argv)
 {
   //--------------------
   pid_t pid = fork ();
   if ( pid == 0 )
   {
+    //------------------------------------
          if ( argv[argc - 2] == "<" )
     {
       char *in_file = argv[argc - 1];
@@ -90,46 +55,57 @@ int   shell_cmd_lunch (int argc, char **argv)
       // int stdout_copy = dup (STDOUT_FILENO);
       close (STDOUT_FILENO);
       // the lowest available value
-      int fd = open (out_file, O_WRONLY);
+      int fd = open (out_file, O_APPEND | O_TRUNC | O_CREAT);
 
       // close (fd);
       // dup2 (stdout_copy, 1);
       // close (stdout_copy);
     }
-    // Child process
+    //------------------------------------
+    /* Child process */
     if ( execvp (argv[0], argv) == -1 )
     {
       perror ("execvp");
       exit (EXIT_FAILURE);
-    }  
+    }
+    //------------------------------------
   }
   else if ( pid < 0 )
   {
-    // Error forking
+    //------------------------------------
+    /* Error forking */
     perror ("fork");
     exit (EXIT_FAILURE);
   }
   else
   {
-    // Parent process
-    int status;
-    do
+    child_foreground_pid = pid;
+    //------------------------------------
+    /* Parent process */
+    int child_status;
+    if ( waitpid (pid, &child_status, 0) == -1 )
     {
       pid_t wpid = waitpid (pid, &status, WUNTRACED);
     } while ( !WIFEXITED (status) && !WIFSIGNALED (status) );
+      // ???
+      return EXIT_FAILURE;
+    }
+    /* !!! return, what wait*() */
+    //------------------------------------
   }
-  return; // !!! return, what wait*()
 }
-int   shell_pipeline2 (char **args1, char **args2)
+int   shell_pipelineN (int argsc, char ***args)
 {
-  int pfd[2];
-
-  /* Create the pipe */
-  if ( pipe (pfd) == -1 )
+  pid_t wpid;
+  //------------------------------
+  if ( argsc < 2 )
   {
-    perror ("pipe");
-    std::exit (1);
+    std::perror ("pipeline");
+    std::exit (EXIT_FAILURE);
   }
+  //------------------------------
+  pid_t pfd_a[2];
+  pid_t pfd_b[2];
 
   if ( !fork () )
   {
@@ -155,8 +131,14 @@ int   shell_pipeline2 (char **args1, char **args2)
   wait (NULL);
 
   return wait (NULL);
+  else
+  {
+    // ???
+    return EXIT_FAILURE;
+  }
+  //------------------------------------
 }
-void  shell_cmd_parse (const std::string &command, std::list<std::string> &cmd_parsed)
+int   shell_cmd_parse (const std::string &command, std::list<std::string> &cmd_parsed)
 {
   std::regex  my_regex ("([a-zA-Z.0-9-]+)|(&&|&|[|][|]|[|]|<|>)");
   std::regex  my_re_sp ("\t|\r|\n");
@@ -168,39 +150,109 @@ void  shell_cmd_parse (const std::string &command, std::list<std::string> &cmd_p
   {
     std::string s = re_it->str ();
     cmd_parsed.push_back (s);
-
-    //      if ( s == "&&" ) { std::cout << ">>> op: and" << std::endl; }
-    // else if ( s == "||" ) { std::cout << ">>> op: or"  << std::endl; }
-    // else if ( s == "&"  ) { std::cout << ">>> op: background" << std::endl; }
-    // else if ( s == "|"  ) { std::cout << ">>> op: pipeline"   << std::endl; }
-    // else if ( s == ">"  ) { std::cout << ">>> op: stdout  to file erase" << std::endl; }
-    // else if ( s == "<"  ) { std::cout << ">>> op: stdin from file erase" << std::endl; }
-    // else
-    // {
-    //   std::cout << s << std::endl;
-    // }
     ++re_it;
   }
 }
+int   shell           (std::list<std::string> &cmds)
+{
+  int     argc = 0, argsc = 0, is_pip = 0;
+  char  **argv = new char* [cmds.size ()];
+  char ***args = new char**[cmds.size ()];
+  for ( int j = 0; j < cmds.size (); ++j )
+    args[j] = new char*[cmds.size ()];
+  //------------------------------------
+  for ( std::string &s : cmds )
+  {
+    if ( flag_sigint )
+    {
+      flag_sigint = 0;
+    }
+    //------------------------------------
+    if ( s == "|" || is_pip )
+    {
+      is_pip = 1;
+      memcpy (args[argsc], argv, argc);
+      argc = 0;
+      ++argsc;
 
+      if ( is_pip == 2 )
+      {
+        char **tmp = args[argsc];
+        args[argsc] = NULL;
+
+        shell_pipelineN (argsc, args);
+
+        args[argsc] = tmp;
+        argsc = 0;
+
+        is_pip = 0;
+      }
+    }
+    else if ( s == "||" )
+    {
+      if ( is_pip )
+      {
+        is_pip = 2;
+        continue;
+      }
+
+      argv[argc] = NULL;
+      if ( shell_cmd_lunch (argc, argv) )
+      argc = 0;
+    }
+    else if ( s == "&&" )
+    {
+      if ( is_pip )
+      {
+        is_pip = 2;
+        continue;
+      }
+
+      argv[argc] = NULL;
+      if ( !shell_cmd_lunch (argc, argv) )
+      argc = 0;
+    }
+    //------------------------------------
+    argv[argc++] = (char*) s.c_str ();
+  }
+  //------------------------------------
+  if ( is_pip )
+  {
+    char **tmp = args[argsc];
+    args[argsc] = NULL;
+
+    shell_pipelineN (argsc, args);
+
+    args[argsc] = tmp;
+    argsc = 0;
+
+    is_pip = 0;
+  }
+
+  if ( argc )
+  {
+    argv[argc] = NULL;
+    shell_cmd_lunch (argc, argv);
+    argc = 0;
+  }
+  //------------------------------------
+  for ( int j = 0; j < cmds.size (); ++j )
+    delete[] args[j];
+
+  delete[] args;
+  delete[] argv;
+  //------------------------------------
+  return EXIT_SUCCESS;
+}
 int  main (int argc, char** argv)
 {
+  child_foreground_pid = 0;
+  //------------------------------------
   // std::string command_example (" head <file.txt|sort\t -n  || cat > file.out && echo ok\n");
   std::string command_line; // = command_example;
 
   std::list<std::string> cmds;
   std::list<pid_t> backgrounds;
-
-  // ??
-  // signal (SIGINT, &sigint_handle);
-  // ??
-  // struct sigaction sa;
-  // sigset_t newset;
-  // sigemptyset (&newset);
-  // sigaddset (&newset, SIGHUP);
-  // sigprocmask (SIG_BLOCK, &newset, 0);
-  // sa.sa_handler = sigint_handle;
-  // sigaction (SIGINT, &sa, 0);
 
   while ( true )
   {
@@ -213,7 +265,8 @@ int  main (int argc, char** argv)
     if ( cmds.back () == "&" )
     {
       cmds.pop_back ();
-      // in background
+      //------------------------------------
+      /* in background */
       pid_t  pid = fork ();
       if ( pid < 0 )
       {
@@ -222,29 +275,14 @@ int  main (int argc, char** argv)
       }
       else if ( pid > 0 )
       {
+        //------------------------------------
         /* parent code */
         backgrounds.push_back (pid);
         std::cerr << "Spawned child process " << pid << std::endl;
-
-        // int status;
-        // if ( wait (&status) == -1 )
-        // {
-        //   std::perror ("wait");
-        //   exit (EXIT_FAILURE);
-        // }
-        // 
-        // if ( WIFEXITED (status) )
-        //   std::printf ("Child terminated normally with exit code %i\n",
-        //   WEXITSTATUS (status));
-        // if ( WIFSIGNALED (status) )
-        //   std::printf ("Child was terminated by a signal #%i\n", WTERMSIG (status));
-        // if ( WCOREDUMP (status) )
-        //   std::printf ("Child dumped core\n");
-        // if ( WIFSTOPPED (status) )
-        //   std::printf ("Child was stopped by a signal #%i\n", WSTOPSIG (status));
       }
       else
       {
+        //------------------------------------
         /* child code */
         shell (cmds);
         return EXIT_SUCCESS;
@@ -252,17 +290,39 @@ int  main (int argc, char** argv)
     } // end if &
     else
     {
+      //------------------------------------
+      /* append signal handler */
+      struct sigaction sa;
+      sigset_t sigintset;
+      sigemptyset (&sigintset);
+      sigaddset (&sigintset, SIGHUP);
+      sigaddset (&sigintset, SIGINT);
+      /* ... */
+      sigprocmask (SIG_BLOCK, &sigintset, 0);
+      sa.sa_handler = sigint_handle;
+      sigaction (SIGINT, &sa, 0);
+      //------------------------------------
       shell (cmds);
+      //------------------------------------
+      /* remove signal handler */
+      sigemptyset (&sigintset);
+      sigaddset (&sigintset, SIGHUP);
+      sigprocmask (SIG_BLOCK, &sigintset, 0);
+      sa.sa_handler = NULL;
+      sigaction (SIGINT, &sa, 0);
+      //------------------------------------
     }
     
     for ( auto pid : backgrounds )
     {
-      int chld_status;
-      waitpid (pid, &chld_status, 0);
-      if ( WIFEXITED (chld_status) )
+      int child_status;
+      /* check for all childs statuses */
+      waitpid (pid, &child_status, WNOHANG);
+      if ( WIFEXITED (child_status) )
       {
-        chld_status = WEXITSTATUS (chld_status);
-        std::cerr << "Process " << pid << "exited: "<< chld_status << std::endl;
+        //------------------------------------
+        int ret = WEXITSTATUS (child_status);
+        std::cerr << "Process " << pid << "exited: "<< ret << std::endl;
       }
       // else /* not yet */
     }
@@ -270,241 +330,55 @@ int  main (int argc, char** argv)
   return EXIT_SUCCESS;
 }
 
-
-typedef void (*sighandler_t)(int);
-static char *my_argv[100], *my_envp[100];
-static char *search_path[10];
-
-void handle_signal (int signo)
-{
-  printf ("\n[MY_SHELL ] ");
-  fflush (stdout);
-}
-
-void fill_argv (char *tmp_argv)
-{
-  char *foo = tmp_argv;
-  int index = 0;
-  char ret[100];
-  bzero (ret, 100);
-  while ( *foo != '\0' )
-  {
-    if ( index == 10 )
-      break;
-
-    if ( *foo == ' ' )
-    {
-      if ( my_argv[index] == NULL )
-        my_argv[index] = (char *) malloc (sizeof (char) * strlen (ret) + 1);
-      else
-      {
-        bzero (my_argv[index], strlen (my_argv[index]));
-      }
-      strncpy (my_argv[index], ret, strlen (ret));
-      strncat (my_argv[index], "\0", 1);
-      bzero (ret, 100);
-      index++;
-    }
-    else
-    {
-      strncat (ret, foo, 1);
-    }
-    foo++;
-    /*printf("foo is %c\n", *foo);*/
-  }
-  my_argv[index] = (char *) malloc (sizeof (char) * strlen (ret) + 1);
-  strncpy (my_argv[index], ret, strlen (ret));
-  strncat (my_argv[index], "\0", 1);
-}
-
-void copy_envp (char **envp)
-{
-  int index = 0;
-  for ( ; envp[index] != NULL; index++ )
-  {
-    my_envp[index] = (char *) malloc (sizeof (char) * (strlen (envp[index]) + 1));
-    memcpy (my_envp[index], envp[index], strlen (envp[index]));
-  }
-}
-
-void get_path_string (char **tmp_envp, char *bin_path)
-{
-  int count = 0;
-  char *tmp;
-  while ( 1 )
-  {
-    tmp = strstr (tmp_envp[count], "PATH");
-    if ( tmp == NULL )
-    {
-      count++;
-    }
-    else
-    {
-      break;
-    }
-  }
-  strncpy (bin_path, tmp, strlen (tmp));
-}
-
-void insert_path_str_to_search (char *path_str)
-{
-  int index = 0;
-  char *tmp = path_str;
-  char ret[100];
-
-  while ( *tmp != '=' )
-    tmp++;
-  tmp++;
-
-  while ( *tmp != '\0' )
-  {
-    if ( *tmp == ':' )
-    {
-      strncat (ret, "/", 1);
-      search_path[index] = (char *) malloc (sizeof (char) * (strlen (ret) + 1));
-      strncat (search_path[index], ret, strlen (ret));
-      strncat (search_path[index], "\0", 1);
-      index++;
-      bzero (ret, 100);
-    }
-    else
-    {
-      strncat (ret, tmp, 1);
-    }
-    tmp++;
-  }
-}
-
-int attach_path (char *cmd)
-{
-  char ret[100];
-  int index;
-  int fd;
-  bzero (ret, 100);
-  for ( index = 0; search_path[index] != NULL; index++ )
-  {
-    strcpy (ret, search_path[index]);
-    strncat (ret, cmd, strlen (cmd));
-    if ( (fd = open (ret, O_RDONLY)) > 0 )
-    {
-      strncpy (cmd, ret, strlen (ret));
-      close (fd);
-      return 0;
-    }
-  }
-  return 0;
-}
-
-void call_execve (char *cmd)
-{
-  int i;
-  printf ("cmd is %s\n", cmd);
-  if ( fork () == 0 )
-  {
-    i = execve (cmd, my_argv, my_envp);
-    printf ("errno is %d\n", errno);
-    if ( i < 0 )
-    {
-      printf ("%s: %s\n", cmd, "command not found");
-      exit (1);
-    }
-  }
-  else
-  {
-    wait (NULL);
-  }
-}
-
-void free_argv ()
-{
-  int index;
-  for ( index = 0; my_argv[index] != NULL; index++ )
-  {
-    bzero (my_argv[index], strlen (my_argv[index]) + 1);
-    my_argv[index] = NULL;
-    free (my_argv[index]);
-  }
-}
-
-int main (int argc, char *argv[], char *envp[])
-{
-  char c;
-  int i, fd;
-  char *tmp      = (char *) malloc (sizeof (char) * 100);
-  char *path_str = (char *) malloc (sizeof (char) * 256);
-  char *cmd      = (char *) malloc (sizeof (char) * 100);
-
-  signal (SIGINT, SIG_IGN);
-  signal (SIGINT, handle_signal);
-
-  copy_envp (envp);
-  get_path_string (my_envp, path_str);
-  insert_path_str_to_search (path_str);
-
-  if ( fork () == 0 )
-  {
-    execve ("/usr/bin/clear", argv, my_envp);
-    exit (1);
-  }
-  else
-  {
-    wait (NULL);
-  }
-  printf ("[MY_SHELL ] ");
-  fflush (stdout);
-  while ( c != EOF )
-  {
-    c = getchar ();
-    switch ( c )
-    {
-      case '\n': if ( tmp[0] == '\0' )
-      {
-        printf ("[MY_SHELL ] ");
-      }
-                 else
-                 {
-                   fill_argv (tmp);
-                   strncpy (cmd, my_argv[0], strlen (my_argv[0]));
-                   strncat (cmd, "\0", 1);
-                   if ( index (cmd, '/') == NULL )
-                   {
-                     if ( attach_path (cmd) == 0 )
-                     {
-                       call_execve (cmd);
-                     }
-                     else
-                     {
-                       printf ("%s: command not found\n", cmd);
-                     }
-                   }
-                   else
-                   {
-                     if ( (fd = open (cmd, O_RDONLY)) > 0 )
-                     {
-                       close (fd);
-                       call_execve (cmd);
-                     }
-                     else
-                     {
-                       printf ("%s: command not found\n", cmd);
-                     }
-                   }
-                   free_argv ();
-                   printf ("[MY_SHELL ] ");
-                   bzero (cmd, 100);
-                 }
-                 bzero (tmp, 100);
-                 break;
-      default: strncat (tmp, &c, 1);
-        break;
-    }
-  }
-  free (tmp);
-  free (path_str);
-  for ( i = 0; my_envp[i] != NULL; i++ )
-    free (my_envp[i]);
-  for ( i = 0; i<10; i++ )
-    free (search_path[i]);
-  printf ("\n");
-  return 0;
-}
+/*
+ *  int   shell_pipeline2 (char **args1, char **args2)
+ *  {
+ *  pid_t wpid;
+ *  pid_t pfd[2];
+ *  
+ *  /* Create the pipe * /
+ *  if ( pipe (pfd) == -1 )
+ *  {
+ *    perror ("pipe");
+ *    std::exit (1);
+ *  }
+ *  
+ *  if ( !fork () )
+ *  {
+ *    // child1
+ *    close (STDOUT_FILENO);
+ *    dup2 (pfd[1], STDOUT_FILENO);
+ *    close (pfd[0]);
+ *    close (pfd[1]);
+ *    execvp (args1[0], args1);
+ *  }
+ *  if ( !fork () )
+ *  {
+ *    // child2
+ *    close (STDIN_FILENO);
+ *    dup2 (pfd[0], STDIN_FILENO);
+ *    close (pfd[0]);
+ *    close (pfd[1]);
+ *    execvp (args2[0], args2);
+ *  }
+ *  
+ *  
+ *  // parent
+ *  close (pfd[0]);
+ *  close (pfd[1]);
+ *  
+ *  int ch_status, ret_stat = EXIT_FAILURE;
+ *  if ( waitpid (wpid, &ch_status, 0) == -1 )
+ *  {
+ *    std::perror ("waitpid");
+ *    std::exit (EXIT_FAILURE);
+ *  }
+ *  
+ *  if ( WIFEXITED (ch_status) )
+ *  {
+ *    ret_stat = WEXITSTATUS (ch_status);
+ *    // printf ("Child terminated normally with exit code %i\n", ret_stat);
+ *  }
+ *  return ret_stat;
+ *  }
+ */
