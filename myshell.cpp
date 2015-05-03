@@ -85,8 +85,21 @@ int   shell_cmd_lunch (int argc,  char  **argv)
     int child_status;
     if ( waitpid (pid, &child_status, 0) == -1 )
     {
-      pid_t wpid = waitpid (pid, &status, WUNTRACED);
-    } while ( !WIFEXITED (status) && !WIFSIGNALED (status) );
+      std::perror ("waitpid");
+      std::exit (EXIT_FAILURE);
+    }
+    //------------------------------------
+    child_foreground_pid = 0;
+    //------------------------------------
+    if ( WIFEXITED (child_status) )
+    {
+      //------------------------------------
+      int ret = WEXITSTATUS (child_status);
+      // printf ("Child terminated normally with exit code %i\n", ret_stat);
+      return ret;
+    }
+    else
+    {
       // ???
       return EXIT_FAILURE;
     }
@@ -107,30 +120,85 @@ int   shell_pipelineN (int argsc, char ***args)
   pid_t pfd_a[2];
   pid_t pfd_b[2];
 
-  if ( !fork () )
+  for ( int i = 0; i < (argsc - 1); ++i )
   {
-    // child1
-    close (STDOUT_FILENO);
-    dup2 (pfd[1], STDOUT_FILENO);
-    close (pfd[0]);
-    close (pfd[1]);
-    execvp (args1[0], args1);
-  }
-  if ( !fork () )
-  {
-    // child2
-    close (STDIN_FILENO);
-    dup2 (pfd[0], STDIN_FILENO);
-    close (pfd[0]);
-    close (pfd[1]);
-    execvp (args2[0], args2);
-  }
-  // parent
-  close (pfd[0]);
-  close (pfd[1]);
-  wait (NULL);
+    //------------------------------------
+    /* Create the pipe */
+    if ( pipe (pfd_a) == -1 )
+    {
+      std::perror ("pipe");
+      std::exit (EXIT_FAILURE);
+    }
 
-  return wait (NULL);
+    if ( !fork () )
+    {
+      //------------------------------------
+      /* child1 */
+      if ( i )
+      {
+        close (STDIN_FILENO);
+        dup2  (pfd_b[0], STDIN_FILENO);
+        close (pfd_b[0]);
+        close (pfd_b[1]);
+      }
+
+      close  (STDOUT_FILENO);
+      dup2   (pfd_a[1], STDOUT_FILENO);
+      close  (pfd_a[0]);
+      close  (pfd_a[1]);
+      execvp (args[i][0], args[i]);
+    }
+    if ( !(wpid = fork ()) )
+    {
+      //------------------------------------
+      /* child2 */
+      close (STDIN_FILENO);
+      dup2  (pfd_a[0], STDIN_FILENO);
+      close (pfd_a[0]);
+      close (pfd_a[1]);
+
+      if ( i != (argsc - 2) )
+      {
+        if ( pipe (pfd_b) == -1 )
+        {
+          std::perror ("pipe");
+          std::exit (EXIT_FAILURE);
+        }
+
+        close (STDOUT_FILENO);
+        dup2  (pfd_b[1], STDOUT_FILENO);
+        close (pfd_b[0]);
+        close (pfd_b[1]);
+      }
+      execvp (args[i + 1][0], args[i + 1]);
+    }
+
+    /* parent */
+    close (pfd_a[0]);
+    close (pfd_a[1]);
+
+    close (pfd_b[0]);
+    close (pfd_b[1]);
+  }
+  //------------------------------------
+  child_foreground_pid = wpid;
+  //------------------------------------
+  int child_status;
+  if ( waitpid (wpid, &child_status, 0) == -1 )
+  {
+    std::perror ("waitpid");
+    std::exit (EXIT_FAILURE);
+  }
+  //------------------------------------
+  child_foreground_pid = 0;
+  //------------------------------------
+  if ( WIFEXITED (child_status) )
+  {
+    //------------------------------------
+    int ret = WEXITSTATUS (child_status);
+    // printf ("Child terminated normally with exit code %i\n", ret_stat);
+    return ret;
+  }
   else
   {
     // ???
@@ -158,6 +226,7 @@ int   shell           (std::list<std::string> &cmds)
   int     argc = 0, argsc = 0, is_pip = 0;
   char  **argv = new char* [cmds.size ()];
   char ***args = new char**[cmds.size ()];
+
   for ( int j = 0; j < cmds.size (); ++j )
     args[j] = new char*[cmds.size ()];
   //------------------------------------
@@ -166,6 +235,7 @@ int   shell           (std::list<std::string> &cmds)
     if ( flag_sigint )
     {
       flag_sigint = 0;
+      return EXIT_FAILURE;
     }
     //------------------------------------
     if ( s == "|" || is_pip )
@@ -198,6 +268,7 @@ int   shell           (std::list<std::string> &cmds)
 
       argv[argc] = NULL;
       if ( shell_cmd_lunch (argc, argv) )
+        return EXIT_SUCCESS;
       argc = 0;
     }
     else if ( s == "&&" )
@@ -210,6 +281,7 @@ int   shell           (std::list<std::string> &cmds)
 
       argv[argc] = NULL;
       if ( !shell_cmd_lunch (argc, argv) )
+        return EXIT_SUCCESS;
       argc = 0;
     }
     //------------------------------------
