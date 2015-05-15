@@ -1,87 +1,94 @@
-﻿#include <sys/types.h>
-#include <sys/wait.h>
-#include <sys/time.h>
-#include <unistd.h>
-#include <stddef.h>
-#include <signal.h>
-#include <fcntl.h>
+﻿#include "myshell.h"
 
-#include <iostream>
-#include <cstring>
-#include <cstdlib>
-#include <string>
-#include <vector>
-#include <cstdio>
-#include <regex>
-#include <list>
-#include <cerrno>
-
-volatile sig_atomic_t  flag_sigint;
-volatile pid_t  child_foreground_pid; // можно как-то передать pid в обработчик?
-void sigint_handle (int sig)
-{ 
-  // printf («proc interrapted\n»);
-  flag_sigint = 1;
-  if( child_foreground_pid )
-    kill (child_foreground_pid, SIGINT);
-}
-
-int  set_cloexec_flag (int desc, bool set)
+#define  MYSHELL_PIPE_FDS_OFST 2
+//----------------------------------------------------------------------------------
+inline myshell_pipe_enum  operator|  (myshell_pipe_enum  a, myshell_pipe_enum b)
+{ return static_cast<myshell_pipe_enum> (static_cast<char> (a) | static_cast<char> (b));  }
+inline myshell_pipe_enum  operator|= (myshell_pipe_enum &a, myshell_pipe_enum b)
+{ return a = (a | b); }
+inline myshell_file_enum  operator|= (myshell_file_enum &a, myshell_file_enum b)
+{ return a = static_cast<myshell_file_enum> (a | b); }
+//----------------------------------------------------------------------------------
+void  myshell_cmd_parse (std::list<std::string> &cmds, const std::string &line)
 {
-  int oldflags = fcntl (desc, F_GETFD, 0);
-  /* If reading the flags failed, return error indication now. */
-  if ( oldflags < 0 )
-    return oldflags;
-  /* Set just the flag we want to set. */
-  if ( set )
-    oldflags |=  FD_CLOEXEC;
-  else
-    oldflags &= ~FD_CLOEXEC;
-  /* Store modified flag word in the descriptor. */
-  return fcntl (desc, F_SETFD, oldflags);
-}
+  std::regex  re_cmds ("([a-zA-Z0-9.-]+)|(&&|&|[|][|]|[|]|<|>)");
+  std::regex  re_spcs ("[\t\r\n ]+");
 
-int   shell_cmd_lunch (int argc,  char  **argv)
+  std::string cmds_parsed = std::regex_replace (line, re_spcs, " ");
+
+  std::regex_iterator<std::string::iterator>  re_end,  re_it (cmds_parsed.begin (), cmds_parsed.end (), re_cmds);
+  while ( re_it != re_end )
+  {
+    std::string s = re_it->str ();
+    cmds.push_back (s);
+
+    ++re_it;
+  }
+}
+//----------------------------------------------------------------------------------
+int   myshell_cmd_lunch (int *argc,  char **argv, 
+                         myshell_file_enum  file_flags, const char *f_inc, const char *f_out,
+                         myshell_pipe_enum  pipe_flags, fd_t  fds[MYSHELL_PIPE_FDS])
 {
-  //--------------------
   pid_t pid = fork ();
-  
+  //--------------------
   if ( pid == 0 )
   {
+    argv[*argc] = NULL;
+
     //------------------------------------
-         if ( argv[argc - 2] == "<" )
+    if ( file_flags & MYSHELL_FILE_INC )
     {
-      char *in_file = argv[argc - 1];
-      argv[argc - 2] = NULL;
-
-      // int  stdin_copy = dup (STDIN_FILENO);
+      // fd_t stdin_copy = dup (STDIN_FILENO);
       close (STDIN_FILENO);
+	  fd_t fd = open(f_inc, O_RDONLY, S_IRUSR | S_IWUSR);
       /* must be 0, because returns always the lowest value */
-      int fd = open (in_file, O_RDONLY);
 
-      // close (in_file);
+#ifdef DEBUG
+      std::cerr << "debug: fin= " << fd << std::endl;
+#endif // DEBUG
+
+      // close (fd);
       // dup2  (stdin_copy, STDIN_FILENO);
       // close (stdin_copy);
     }
-    else if ( argv[argc - 2] == ">" )
+    if ( file_flags & MYSHELL_FILE_OUT )
     {
-      char *out_file = argv[argc - 1];
-      argv[argc - 2] = NULL;
-
-      // int stdout_copy = dup (STDOUT_FILENO);
+      // fd_t stdout_copy = dup (STDOUT_FILENO);
       close (STDOUT_FILENO);
-      // the lowest available value
-      int fd = open (out_file, O_APPEND | O_TRUNC | O_CREAT);
+	  fd_t fd = open(f_out, O_APPEND | O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
+      /* the lowest available value */
 
-      // close (out_file);
+#ifdef DEBUG
+      std::cerr << "debug: fout= " << fd << std::endl;
+#endif // DEBUG
+
+      // close (fd);
       // dup2  (stdout_copy, STDOUT_FILENO);
       // close (stdout_copy);
     }
     //------------------------------------
-    /* Child process */
-    if ( execvp (argv[0], argv) == -1 )
+    if ( pipe_flags & MYSHELL_PIPE_INC )
     {
-      perror ("execvp");
+      close (STDIN_FILENO);
+      dup2  (fds[0], STDIN_FILENO);
+    }
+    if ( pipe_flags & MYSHELL_PIPE_OUT )
+    {
+      close (STDOUT_FILENO);
+      dup2  (fds[1], STDOUT_FILENO);
+    }
+    
+    /* To no pid flows away */
+    if ( pipe_flags )
+    {
+      for ( int i = 0; i < MYSHELL_PIPE_FDS; ++i )
+        close (fds[i]);
+    }
+    //------------------------------------
+    /* Create the child process */
+    if ( execvp (argv[0], argv) == -1 )
+    { perror ("execvp");
       exit (EXIT_FAILURE);
     }
     //------------------------------------
@@ -95,377 +102,186 @@ int   shell_cmd_lunch (int argc,  char  **argv)
   }
   else
   {
-    child_foreground_pid = pid;
     //------------------------------------
-    /* Parent process */
-    int child_status;
-    if ( waitpid (pid, &child_status, 0) == -1 )
+    if ( pipe_flags & MYSHELL_PIPE_PID )
     {
-      std::perror ("waitpid");
-      std::exit (EXIT_FAILURE);
-    }
-    //------------------------------------
-    child_foreground_pid = 0;
-    //------------------------------------
-    if ( WIFEXITED (child_status) )
-    {
+      sigint_enable (pid);
       //------------------------------------
-      int ret = WEXITSTATUS (child_status);
-      // printf ("Child terminated normally with exit code %i\n", ret_stat);
-      return ret;
+      /* Parent process */
+      int child_status;
+      if ( waitpid (pid, &child_status, 0) == -1 )
+      { std::perror ("waitpid");
+        std::exit (EXIT_FAILURE);
+      }
+      //------------------------------------
+      sigint_disable ();
+      *argc = 0;
+      //------------------------------------
+      if ( WIFEXITED (child_status) )
+      {
+        //------------------------------------
+        int ret = WEXITSTATUS (child_status);
+        // printf ("Child terminated normally with exit code %i\n", ret_stat);
+        return ret;
+      }
+      else
+      {
+        // ??? return, what wait*() */
+        return EXIT_FAILURE;
+      }
+      //------------------------------------
     }
     else
     {
-      // ???
-      return EXIT_FAILURE;
+      return pid;
     }
-    /* !!! return, what wait*() */
-    //------------------------------------
   }
 }
-int   shell_pipelineN (int argsc, char ***args)
+//----------------------------------------------------------------------------------
+int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgrounds)
 {
-  pid_t wpid;
-  //------------------------------
-  if ( argsc < 2 )
-  {
-    std::perror ("pipeline");
-    std::exit (EXIT_FAILURE);
-  }
-  //------------------------------
-  pid_t pfd_a[2];
-  pid_t pfd_b[2];
-
-  for ( int i = 0; i < (argsc - 1); ++i )
-  {
-    //------------------------------------
-    /* Create the pipe */
-    if ( pipe (pfd_a) == -1 )
-    {
-      std::perror ("pipe");
-      std::exit (EXIT_FAILURE);
-    }
-
-    if ( !fork () )
-    {
-      //------------------------------------
-      /* child1 */
-      if ( i )
-      {
-        close (STDIN_FILENO);
-        dup2  (pfd_b[0], STDIN_FILENO);
-        close (pfd_b[0]);
-        close (pfd_b[1]);
-      }
-
-      close  (STDOUT_FILENO);
-      dup2   (pfd_a[1], STDOUT_FILENO);
-      close  (pfd_a[0]);
-      close  (pfd_a[1]);
-      execvp (args[i][0], args[i]);
-    }
-    if ( !(wpid = fork ()) )
-    {
-      //------------------------------------
-      /* child2 */
-      close (STDIN_FILENO);
-      dup2  (pfd_a[0], STDIN_FILENO);
-      close (pfd_a[0]);
-      close (pfd_a[1]);
-
-      if ( i != (argsc - 2) )
-      {
-        if ( pipe (pfd_b) == -1 )
-        {
-          std::perror ("pipe");
-          std::exit (EXIT_FAILURE);
-        }
-
-        close (STDOUT_FILENO);
-        dup2  (pfd_b[1], STDOUT_FILENO);
-        close (pfd_b[0]);
-        close (pfd_b[1]);
-      }
-      execvp (args[i + 1][0], args[i + 1]);
-    }
-
-    /* parent */
-    close (pfd_a[0]);
-    close (pfd_a[1]);
-
-    close (pfd_b[0]);
-    close (pfd_b[1]);
-  }
+  int result = EXIT_SUCCESS;
+  int cmds_size = (cmds.size () + 1);
   //------------------------------------
-  child_foreground_pid = wpid;
-  //------------------------------------
-  int child_status;
-  if ( waitpid (wpid, &child_status, 0) == -1 )
-  {
-    std::perror ("waitpid");
-    std::exit (EXIT_FAILURE);
-  }
-  //------------------------------------
-  child_foreground_pid = 0;
-  //------------------------------------
-  if ( WIFEXITED (child_status) )
-  {
-    //------------------------------------
-    int ret = WEXITSTATUS (child_status);
-    // printf ("Child terminated normally with exit code %i\n", ret_stat);
-    return ret;
-  }
-  else
-  {
-    // ???
-    return EXIT_FAILURE;
-  }
-  //------------------------------------
-}
-int   shell_cmd_parse (const std::string &command, std::list<std::string> &cmd_parsed)
-{
-  std::regex  my_regex ("([a-zA-Z.0-9-]+)|(&&|&|[|][|]|[|]|<|>)");
-  std::regex  my_re_sp ("\t|\r|\n");
-
-  std::string cmd = std::regex_replace (command, my_re_sp, " ");
-
-  std::regex_iterator<std::string::iterator> re_end, re_it (cmd.begin (), cmd.end (), my_regex);
-  while ( re_it != re_end )
-  {
-    std::string s = re_it->str ();
-    cmd_parsed.push_back (s);
-    ++re_it;
-  }
-}
-int   shell           (std::list<std::string> &cmds)
-{
   int     argc = 0, argsc = 0, is_pip = 0;
-  char  **argv = new char* [cmds.size ()];
-  char ***args = new char**[cmds.size ()];
+  char  **argv = new char* [cmds_size];
+  char ***args = new char**[cmds_size];
 
-  for ( int j = 0; j < cmds.size (); ++j )
-    args[j] = new char*[cmds.size ()];
+  for ( int j = 0; j < cmds_size; ++j )
+    args[j] = new char*[cmds_size];
   //------------------------------------
-  for ( std::string &s : cmds )
+  myshell_file_enum  file_flags = MYSHELL_FILE_NOT;
+  const char *f_inc = NULL, *f_out = NULL;
+  //------------------------------------
+  myshell_pipe_enum  pipe_flags = MYSHELL_PIPE_NOT;
+  fd_t fds[MYSHELL_PIPE_FDS];
+  memset (fds, -1, sizeof (fds));
+  //------------------------------------
+  // for ( std::string &s : cmds )
+  for ( auto it = cmds.begin (); it != cmds.end (); ++it )
   {
-    if ( flag_sigint )
+    std::string &s = *it;
+
+    if ( sigint_flag )
     {
-      flag_sigint = 0;
-      return EXIT_FAILURE;
+      sigint_flag = false;
+      result = EXIT_FAILURE;
+      break;
     }
     //------------------------------------
-    if ( s == "|" || is_pip )
+#ifdef DEBUG
+    std::cerr << "debug: ";
+    for ( int k = 0; k < argc; ++k )
+      std::cerr << argv[k] << " ' ";
+    std::cerr << std::endl;
+#endif // DEBUG
+
+         if ( s == "<" )
     {
-      is_pip = 1;
-      memcpy (args[argsc], argv, argc);
-      argc = 0;
-      ++argsc;
+      file_flags |= MYSHELL_FILE_INC;
+      ++it; s = *it;
+      f_inc = s.c_str ();
 
-      if ( is_pip == 2 )
-      {
-        char **tmp = args[argsc];
-        args[argsc] = NULL;
+#ifdef DEBUG
+      std::cerr << "debug file_io: " << f_inc << " " << f_out << std::endl;
+#endif // DEBUG
+    }
+    else if ( s == ">" )
+    {
+      file_flags |= MYSHELL_FILE_OUT;
+      ++it; s = *it;
+      f_out = s.c_str ();
 
-        shell_pipelineN (argsc, args);
-
-        args[argsc] = tmp;
-        argsc = 0;
-
-        is_pip = 0;
+#ifdef DEBUG
+      std::cerr << "debug file_io: " << f_inc << " " << f_out << std::endl;
+#endif // DEBUG
+    }
+    else if ( s == "|" )
+    {
+      //------------------------------------
+      /* Create the pipe */
+      if ( pipe (fds + MYSHELL_PIPE_FDS_OFST) == -1 ) // lfds[1] = fds[1] -> lfds[0] = next fds[0]
+      { std::perror ("pipe");
+        std::exit (EXIT_FAILURE);
       }
+
+      if ( pipe_flags & MYSHELL_PIPE_OUT )
+      {
+        std::swap (fds[1], fds[1 + MYSHELL_PIPE_FDS_OFST]);
+        pipe_flags |= MYSHELL_PIPE_INC;
+      }
+      else
+      {
+        pipe_flags |= MYSHELL_PIPE_OUT;
+      }
+      //------------------------------------
+      int  bg_pid = myshell_cmd_lunch (&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds);
+      backgrounds.push_back (bg_pid);
+
+      file_flags = MYSHELL_FILE_NOT;
+      f_inc = NULL; f_out = NULL;
+
+      pipe_flags = MYSHELL_PIPE_NOT;
+      //------------------------------------
+      if ( pipe_flags & MYSHELL_PIPE_INC )
+      {
+        close (fds[0]); fds[0] = -1;
+        std::swap (fds[0], fds[0 + MYSHELL_PIPE_FDS_OFST]);
+        // close (fds[1 + MYSHELL_PIPE_FDS_OFST]); // already closed
+        pipe_flags = MYSHELL_PIPE_INC;
+      }
+      /* skip closing zero, because it last inc */
+      close (fds[1]); fds[1] = -1;
+      //------------------------------------
     }
     else if ( s == "||" )
     {
-      if ( is_pip )
-      {
-        is_pip = 2;
-        continue;
-      }
+      pipe_flags |= MYSHELL_PIPE_PID;
+	  if ( !myshell_cmd_lunch(&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds) )
+        break;
 
-      argv[argc] = NULL;
-      if ( shell_cmd_lunch (argc, argv) )
-        return EXIT_SUCCESS;
-      argc = 0;
+      file_flags = MYSHELL_FILE_NOT;
+      f_inc = NULL; f_out = NULL;
+
+      pipe_flags = MYSHELL_PIPE_NOT;
     }
     else if ( s == "&&" )
     {
-      if ( is_pip )
-      {
-        is_pip = 2;
-        continue;
-      }
+      pipe_flags |= MYSHELL_PIPE_PID;
+      if ( myshell_cmd_lunch (&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds) )
+        break;
 
-      argv[argc] = NULL;
-      if ( !shell_cmd_lunch (argc, argv) )
-        return EXIT_SUCCESS;
-      argc = 0;
+      file_flags = MYSHELL_FILE_NOT;
+      f_inc = NULL; f_out = NULL;
+
+      pipe_flags = MYSHELL_PIPE_NOT;
     }
-    //------------------------------------
-    argv[argc++] = (char*) s.c_str ();
+    else
+    {
+      argv[argc++] = (char*) s.c_str ();
+    }   
   }
   //------------------------------------
-  if ( is_pip )
-  {
-    char **tmp = args[argsc];
-    args[argsc] = NULL;
-
-    shell_pipelineN (argsc, args);
-
-    args[argsc] = tmp;
-    argsc = 0;
-
-    is_pip = 0;
-  }
-
   if ( argc )
   {
-    argv[argc] = NULL;
-    shell_cmd_lunch (argc, argv);
-    argc = 0;
+    pipe_flags |= MYSHELL_PIPE_PID;
+    myshell_cmd_lunch (&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds);
+
+    file_flags = MYSHELL_FILE_NOT;
+    f_inc = NULL; f_out = NULL;
+
+    pipe_flags = MYSHELL_PIPE_NOT;
   }
+
   //------------------------------------
-  for ( int j = 0; j < cmds.size (); ++j )
+  for ( int j = 0; j < cmds_size; ++j )
     delete[] args[j];
 
   delete[] args;
   delete[] argv;
   //------------------------------------
-  return EXIT_SUCCESS;
-}
-int  main (int argc, char** argv)
-{
-  child_foreground_pid = 0;
+  cmds.clear ();
   //------------------------------------
-  // std::string command_example (" head <file.txt|sort\t -n  || cat > file.out && echo ok\n");
-  std::string command_line; // = command_example;
-
-  std::list<std::string> cmds;
-  std::list<pid_t> backgrounds;
-
-  while ( true )
-  {
-    std::cout << "myshell: ";
-    std::cout.flush ();
-
-    std::getline (std::cin, command_line);
-    shell_cmd_parse (command_line, cmds);
-
-    if ( cmds.back () == "&" )
-    {
-      cmds.pop_back ();
-      //------------------------------------
-      /* in background */
-      pid_t  pid = fork ();
-      if ( pid < 0 )
-      {
-        std::perror ("fork");
-        exit (EXIT_FAILURE);
-      }
-      else if ( pid > 0 )
-      {
-        //------------------------------------
-        /* parent code */
-        backgrounds.push_back (pid);
-        std::cerr << "Spawned child process " << pid << std::endl;
-      }
-      else
-      {
-        //------------------------------------
-        /* child code */
-        shell (cmds);
-        return EXIT_SUCCESS;
-      }
-    } // end if &
-    else
-    {
-      //------------------------------------
-      /* append signal handler */
-      struct sigaction sa;
-      sigset_t sigintset;
-      sigemptyset (&sigintset);
-      sigaddset (&sigintset, SIGHUP);
-      /* ... */
-      sigprocmask (SIG_BLOCK, &sigintset, 0);
-      sa.sa_handler = sigint_handle;
-      sigaction (SIGINT, &sa, 0);
-      //------------------------------------
-      shell (cmds);
-      //------------------------------------
-      /* remove signal handler */
-      sigemptyset (&sigintset);
-      sigaddset (&sigintset, SIGHUP);
-      sigprocmask (SIG_BLOCK, &sigintset, 0);
-      sa.sa_handler = NULL;
-      sigaction (SIGINT, &sa, 0);
-      //------------------------------------
-    }
-    
-    for ( auto pid : backgrounds )
-    {
-      int child_status;
-      /* check for all childs statuses */
-      waitpid (pid, &child_status, WNOHANG);
-      if ( WIFEXITED (child_status) )
-      {
-        //------------------------------------
-        int ret = WEXITSTATUS (child_status);
-        std::cerr << "Process " << pid << "exited: "<< ret << std::endl;
-      }
-      // else /* not yet */
-    }
-  }
-  return EXIT_SUCCESS;
+  return result;
 }
-
-/*
- *  int   shell_pipeline2 (char **args1, char **args2)
- *  {
- *  pid_t wpid;
- *  pid_t pfd[2];
- *  
- *  /* Create the pipe * /
- *  if ( pipe (pfd) == -1 )
- *  {
- *    perror ("pipe");
- *    std::exit (1);
- *  }
- *  
- *  if ( !fork () )
- *  {
- *    // child1
- *    close (STDOUT_FILENO);
- *    dup2 (pfd[1], STDOUT_FILENO);
- *    close (pfd[0]);
- *    close (pfd[1]);
- *    execvp (args1[0], args1);
- *  }
- *  if ( !fork () )
- *  {
- *    // child2
- *    close (STDIN_FILENO);
- *    dup2 (pfd[0], STDIN_FILENO);
- *    close (pfd[0]);
- *    close (pfd[1]);
- *    execvp (args2[0], args2);
- *  }
- *  
- *  
- *  // parent
- *  close (pfd[0]);
- *  close (pfd[1]);
- *  
- *  int ch_status, ret_stat = EXIT_FAILURE;
- *  if ( waitpid (wpid, &ch_status, 0) == -1 )
- *  {
- *    std::perror ("waitpid");
- *    std::exit (EXIT_FAILURE);
- *  }
- *  
- *  if ( WIFEXITED (ch_status) )
- *  {
- *    ret_stat = WEXITSTATUS (ch_status);
- *    // printf ("Child terminated normally with exit code %i\n", ret_stat);
- *  }
- *  return ret_stat;
- *  }
- */
+//----------------------------------------------------------------------------------
