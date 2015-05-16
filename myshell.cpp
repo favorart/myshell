@@ -11,7 +11,7 @@ inline myshell_file_enum  operator|= (myshell_file_enum &a, myshell_file_enum b)
 //----------------------------------------------------------------------------------
 void  myshell_cmd_parse (std::list<std::string> &cmds, const std::string &line)
 {
-  std::regex  re_cmds ("([a-zA-Z0-9.-]+)|(&&|&|[|][|]|[|]|<|>)");
+  std::regex  re_cmds ("([a-zA-Z0-9.$;-]+)|(&&|&|[|][|]|[|]|<|>)");
   std::regex  re_spcs ("[\t\r\n ]+");
 
   std::string cmds_parsed = std::regex_replace (line, re_spcs, " ");
@@ -41,12 +41,12 @@ int   myshell_cmd_lunch (int *argc,  char **argv,
     {
       // fd_t stdin_copy = dup (STDIN_FILENO);
       close (STDIN_FILENO);
-	  fd_t fd = open(f_inc, O_RDONLY, S_IRUSR | S_IWUSR);
+	    fd_t fd = open(f_inc, O_RDONLY, S_IRUSR | S_IWUSR);
       /* must be 0, because returns always the lowest value */
 
-#ifdef DEBUG
+#ifdef _DEBUG
       std::cerr << "debug: fin= " << fd << std::endl;
-#endif // DEBUG
+#endif // _DEBUG
 
       // close (fd);
       // dup2  (stdin_copy, STDIN_FILENO);
@@ -56,12 +56,12 @@ int   myshell_cmd_lunch (int *argc,  char **argv,
     {
       // fd_t stdout_copy = dup (STDOUT_FILENO);
       close (STDOUT_FILENO);
-	  fd_t fd = open(f_out, O_APPEND | O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
+	    fd_t fd = open(f_out, O_APPEND | O_WRONLY | O_TRUNC | O_CREAT, S_IRUSR | S_IWUSR);
       /* the lowest available value */
 
-#ifdef DEBUG
+#ifdef _DEBUG
       std::cerr << "debug: fout= " << fd << std::endl;
-#endif // DEBUG
+#endif // _DEBUG
 
       // close (fd);
       // dup2  (stdout_copy, STDOUT_FILENO);
@@ -102,6 +102,7 @@ int   myshell_cmd_lunch (int *argc,  char **argv,
   }
   else
   {
+    *argc = 0;
     //------------------------------------
     if ( pipe_flags & MYSHELL_PIPE_PID )
     {
@@ -115,26 +116,25 @@ int   myshell_cmd_lunch (int *argc,  char **argv,
       }
       //------------------------------------
       sigint_disable ();
-      *argc = 0;
+      //------------------------------------
+      close (fds[0]); fds[0] = -1;
       //------------------------------------
       if ( WIFEXITED (child_status) )
       {
         //------------------------------------
         int ret = WEXITSTATUS (child_status);
         // printf ("Child terminated normally with exit code %i\n", ret_stat);
+        std::cerr << "Process " << pid << " exited: " << ret << std::endl;
         return ret;
       }
       else
       {
         // ??? return, what wait*() */
-        return EXIT_FAILURE;
+        return EXIT_SUCCESS; // EXIT_FAILURE;
       }
       //------------------------------------
     }
-    else
-    {
-      return pid;
-    }
+    return pid;
   }
 }
 //----------------------------------------------------------------------------------
@@ -169,32 +169,32 @@ int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgro
       break;
     }
     //------------------------------------
-#ifdef DEBUG
+#ifdef _DEBUG
     std::cerr << "debug: ";
     for ( int k = 0; k < argc; ++k )
       std::cerr << argv[k] << " ' ";
     std::cerr << std::endl;
-#endif // DEBUG
+#endif // _DEBUG
 
          if ( s == "<" )
     {
-      file_flags |= MYSHELL_FILE_INC;
       ++it; s = *it;
       f_inc = s.c_str ();
+      file_flags |= MYSHELL_FILE_INC;
 
-#ifdef DEBUG
+#ifdef _DEBUG
       std::cerr << "debug file_io: " << f_inc << " " << f_out << std::endl;
-#endif // DEBUG
+#endif // _DEBUG
     }
     else if ( s == ">" )
     {
-      file_flags |= MYSHELL_FILE_OUT;
       ++it; s = *it;
       f_out = s.c_str ();
+      file_flags |= MYSHELL_FILE_OUT;
 
-#ifdef DEBUG
+#ifdef _DEBUG
       std::cerr << "debug file_io: " << f_inc << " " << f_out << std::endl;
-#endif // DEBUG
+#endif // _DEBUG
     }
     else if ( s == "|" )
     {
@@ -205,14 +205,12 @@ int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgro
         std::exit (EXIT_FAILURE);
       }
 
-      if ( pipe_flags & MYSHELL_PIPE_OUT )
+      std::swap (fds[1], fds[1 + MYSHELL_PIPE_FDS_OFST]);
+      pipe_flags |= MYSHELL_PIPE_OUT;
+
+      if ( !(pipe_flags & MYSHELL_PIPE_INC) )
       {
-        std::swap (fds[1], fds[1 + MYSHELL_PIPE_FDS_OFST]);
-        pipe_flags |= MYSHELL_PIPE_INC;
-      }
-      else
-      {
-        pipe_flags |= MYSHELL_PIPE_OUT;
+        std::swap (fds[0], fds[0 + MYSHELL_PIPE_FDS_OFST]);
       }
       //------------------------------------
       int  bg_pid = myshell_cmd_lunch (&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds);
@@ -220,16 +218,14 @@ int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgro
 
       file_flags = MYSHELL_FILE_NOT;
       f_inc = NULL; f_out = NULL;
-
-      pipe_flags = MYSHELL_PIPE_NOT;
       //------------------------------------
       if ( pipe_flags & MYSHELL_PIPE_INC )
       {
         close (fds[0]); fds[0] = -1;
         std::swap (fds[0], fds[0 + MYSHELL_PIPE_FDS_OFST]);
         // close (fds[1 + MYSHELL_PIPE_FDS_OFST]); // already closed
-        pipe_flags = MYSHELL_PIPE_INC;
       }
+      pipe_flags = MYSHELL_PIPE_INC;
       /* skip closing zero, because it last inc */
       close (fds[1]); fds[1] = -1;
       //------------------------------------
@@ -237,7 +233,7 @@ int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgro
     else if ( s == "||" )
     {
       pipe_flags |= MYSHELL_PIPE_PID;
-	  if ( !myshell_cmd_lunch(&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds) )
+	    if ( !myshell_cmd_lunch(&argc, argv, file_flags, f_inc, f_out, pipe_flags, fds) )
         break;
 
       file_flags = MYSHELL_FILE_NOT;

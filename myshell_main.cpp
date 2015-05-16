@@ -11,26 +11,25 @@ int  main (int argc, char** argv)
   std::list<std::string> cmds;
   std::list<pid_t> backgrounds;
 
-#ifdef DEBUG
-  std::fstream fin ("/home/kill/ts_k.golikov/p4/4-shell/tests/3.sh");
+#ifdef _DEBUG
+  std::fstream fin ("/home/kill/ts_k.golikov/p4/4-shell/tests/6.sh");
   while ( std::getline (fin, command_line, '\n') ) 
-#else
+#else // end _DEBUG
+  // while ( !std::cin.eof() )
   while ( std::getline (std::cin, command_line, '\n') )
-#endif // DEBUG
+#endif 
   {
 
-#ifdef DEBUG
+#ifdef _DEBUG
     std::cerr  << "debug: " << command_line;
     std::cerr.flush ();
-#else
+#else // end _DEBUG
     if ( isatty (fileno (stdout)) )
     {
       std::cout << "myshell: ";
       std::cout.flush ();
     }
-
-    std::getline (std::cin, command_line);
-#endif // DEBUG
+#endif
 
     myshell_cmd_parse (cmds, command_line);
 
@@ -54,6 +53,7 @@ int  main (int argc, char** argv)
         /* parent code */
         backgrounds.push_back (pid);
         std::cerr << "Spawned child process " << pid << std::endl;
+        cmds.clear ();
       }
       else
       {
@@ -79,7 +79,7 @@ int  main (int argc, char** argv)
       {
         //------------------------------------
         int ret = WEXITSTATUS (child_status);
-        std::cerr << "Process " << pid << "exited: "<< ret << std::endl;
+        std::cerr << "Process " << pid << " exited: "<< ret << std::endl;
       }
       // else /* not yet */
     }

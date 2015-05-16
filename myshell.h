@@ -53,3 +53,5 @@ int   myshell_cmd_lunch (int *argc, char **argv, myshell_pipe_enum  pipe, fd_t f
 void  myshell_cmd_parse (std::list<std::string> &cmds, const std::string &line);
 int   myshell_execution (std::list<std::string> &cmds, std::list<pid_t> &backgrounds);
 //----------------------------------------------------------------------------------
+// #define _DEBUG
+
