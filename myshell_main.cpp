@@ -12,29 +12,30 @@ int  main (int argc, char** argv)
   std::list<pid_t> backgrounds;
 
 #ifdef _DEBUG
-  std::fstream fin ("/home/kill/ts_k.golikov/p4/4-shell/tests/6.sh");
+  std::fstream fin ("/home/kill/ts_k.golikov/p4/4-shell/tests/n.sh");
   while ( std::getline (fin, command_line, '\n') ) 
-#else // end _DEBUG
-  // while ( !std::cin.eof() )
-  while ( std::getline (std::cin, command_line, '\n') )
-#endif 
+#else  // !_DEBUG
+  while ( !std::cin.eof() )
+#endif // !_DEBUG
   {
+    sigint_flag = false;
 
-#ifdef _DEBUG
+#ifdef  _DEBUG_PARSE
     std::cerr  << "debug: " << command_line;
     std::cerr.flush ();
-#else // end _DEBUG
+#endif //  _DEBUG_PARSE
+#ifndef _DEBUG 
     if ( isatty (fileno (stdout)) )
     {
       std::cout << "myshell: ";
       std::cout.flush ();
     }
-#endif
-
+    std::getline (std::cin, command_line, '\n');
+#endif // !_DEBUG
+    
     myshell_cmd_parse (cmds, command_line);
-
     if ( cmds.size () <= 0 )
-      continue;
+    { continue; }
 
     if ( cmds.back () == "&" )
     {
